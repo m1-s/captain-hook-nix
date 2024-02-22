@@ -1,54 +1,29 @@
-{ testers, git, builder, writeShellScript, lib }:
+{ testers, git, builder, writeShellScript, lib, fenceStart, fenceEnd }:
 let
-  tests = [
-    {
-      hooks = [{
-        type = "commit";
-        cmd = "exit 1";
-      }];
-    }
-    {
-      hooks = [
-        {
-          type = "commit";
-          cmd = "exit 1";
-        }
-        {
-          type = "post-checkout";
-          cmd = "exit 2";
-        }
-      ];
-    }
-  ];
-
-  assertSingleHook = hook:
-    let
-      type = lib.getAttrFromPath [ "type" ] hook;
-      cmd = lib.getAttrFromPath [ "cmd" ] hook;
-    in
-    ''
-      if [ `cat .git/hooks/${type}` != '${cmd}' ]; then
-        echo 'Expected `cat .git/hooks/${type}` but found $CONTENT'
-      fi
-    '';
-
-  singleTest = test:
-    let
-      hooksFromTest = lib.getAttrFromPath [ "hooks" ] test;
-      setup = builder { hooks = hooksFromTest; inherit git writeShellScript; };
-      asserts =
-        let script = lib.concatMapStrings (hook: assertSingleHook hook) hooksFromTest;
-        in writeShellScript "nix-commit-hooks-asserts" ("set -eoux\n" + script);
-    in
-    ''
-      print("setting up...")
-      vm.succeed("${setup}")
-      print("asserting...")
-      vm.succeed("${asserts}")
-      print("cleaning up...")
-      vm.succeed("rm .git/hooks/*")
-    '';
-  execAllTests = lib.concatMapStrings singleTest tests;
+  tests = {
+    singleHookTest.hooks = [{
+      type = "pre-commit";
+      cmd = "foo";
+    }];
+    multipleHooksTest.hooks = [
+      {
+        type = "post-merge";
+        cmd = "foo";
+      }
+      {
+        type = "post-checkout";
+        cmd = "foo";
+      }
+    ];
+    singleHookAppendTest.hooks = [{
+      type = "pre-checkout";
+      cmd = "foo";
+    }];
+    singleHookModifyTest.hooks = [{
+      type = "pre-merge";
+      cmd = "foo";
+    }];
+  };
 in
 testers.nixosTest {
   name = "file-test";
@@ -57,7 +32,45 @@ testers.nixosTest {
   };
 
   testScript = ''
-    vm.start()
-    vm.succeed("git init")
-  '' + execAllTests;
+    class TestFolder(object):
+      def __enter__(self):
+        vm.succeed("git init")
+
+      def __exit__(self, *args):
+        vm.succeed("rm -r .git")
+
+    def surroundWithFences(s: str):
+      return f"${fenceStart}\n{s}\n${fenceEnd}\n"
+
+    with TestFolder():
+      vm.succeed("${builder { inherit (tests.singleHookTest) hooks; inherit git writeShellScript; }}")
+      actual = vm.succeed("cat .git/hooks/${(builtins.head tests.singleHookTest.hooks).type}")
+      expected = surroundWithFences("${(builtins.head tests.singleHookTest.hooks).cmd}")
+      assert actual == expected, f"Expected '{expected}' but was '{actual}'"
+
+    with TestFolder():
+      vm.succeed("${builder { inherit (tests.multipleHooksTest) hooks; inherit git writeShellScript; }}")
+      actual = vm.succeed("cat .git/hooks/${(builtins.head tests.multipleHooksTest.hooks).type}")
+      expected = surroundWithFences("${(builtins.head tests.multipleHooksTest.hooks).cmd}")
+      assert actual == expected, f"Expected '{expected}' but was '{actual}'"
+
+    with TestFolder():
+      previousContent = "bar"
+      vm.succeed(f"echo {previousContent} > .git/hooks/${(builtins.head tests.singleHookAppendTest.hooks).type}")
+      vm.succeed("${builder { inherit (tests.singleHookAppendTest) hooks; inherit git writeShellScript; }}")
+      actual = vm.succeed("cat .git/hooks/${(builtins.head tests.singleHookAppendTest.hooks).type}")
+      expected = (f"{previousContent}\n"
+        + surroundWithFences("${(builtins.head tests.singleHookAppendTest.hooks).cmd}"))
+      assert actual == expected, f"Expected '{expected}' but was '{actual}'"
+
+    with TestFolder():
+      vm.succeed("${builder { inherit (tests.singleHookModifyTest) hooks; inherit git writeShellScript; }}")
+      user_appended_content = "bar"
+      vm.succeed(f"echo {user_appended_content} >> .git/hooks/${(builtins.head tests.singleHookModifyTest.hooks).type}")
+      vm.succeed("${builder { inherit (tests.singleHookModifyTest) hooks; inherit git writeShellScript; }}")
+      actual = vm.succeed("cat .git/hooks/${(builtins.head tests.singleHookModifyTest.hooks).type}")
+      expected = (f"{user_appended_content}\n"
+        + surroundWithFences("${(builtins.head tests.singleHookModifyTest.hooks).cmd}"))
+      assert actual == expected, f"Expected '{expected}' but was '{actual}'"
+  '';
 }

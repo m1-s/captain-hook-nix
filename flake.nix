@@ -6,6 +6,10 @@
   inputs.pre-commit-hooks.url = "github:cachix/pre-commit-hooks.nix";
 
   outputs = { self, nixpkgs, flake-utils, pre-commit-hooks }:
+    let
+      fenceStart = "# captain-hook-nix start";
+      fenceEnd = "# captain-hook-nix end";
+    in
     flake-utils.lib.eachDefaultSystem
       (system:
         let pkgs = import nixpkgs { inherit system; };
@@ -15,7 +19,7 @@
           };
 
           checks = {
-            fileTests = pkgs.callPackage ./test.nix { builder = self.lib.builder; };
+            fileTests = pkgs.callPackage ./test.nix { builder = self.lib.builder; inherit fenceStart fenceEnd; };
             pre-commit-check = pre-commit-hooks.lib.${system}.run {
               src = ./.;
               hooks = {
@@ -26,12 +30,42 @@
         }) // {
       lib.builder = { git, hooks, writeShellScript }:
         let
+          # taken from https://git-scm.com/docs/githooks
+          possibleHooks = [
+            "applypatch-msg"
+            "commit-msg"
+            "fsmonitor-watchman"
+            "p4-changelist"
+            "p4-post-changelist"
+            "p4-pre-submit"
+            "p4-prepare-changelist"
+            "post-applypatch"
+            "post-checkout"
+            "post-commit"
+            "post-index-change"
+            "post-merge"
+            "post-rewrite"
+            "pre-applypatch"
+            "pre-auto-gc"
+            "pre-commit"
+            "pre-merge-commit"
+            "pre-push"
+            "pre-rebase"
+            "prepare-commit-msg"
+            "reference-transaction"
+            "sendemail-validate"
+          ];
           singleHook = attrs:
             let
-              type = nixpkgs.lib.getAttrFromPath [ "type" ] attrs;
-              cmd = nixpkgs.lib.getAttrFromPath [ "cmd" ] attrs;
+              type = assert (nixpkgs.lib.assertOneOf "hook" attrs.type possibleHooks); attrs.type;
             in
-            "echo '${cmd}' > .git/hooks/${type};";
+            ''
+              HOOK_PATH=".git/hooks/${attrs.type}"
+              CONTENT=`cat $HOOK_PATH` || true
+
+              perl -0777 -pi -e 's/^# captain-hook-nix start$([\S\s])*^# captain-hook-nix end[\n]?//gm' "$HOOK_PATH"
+              echo -e '${fenceStart}\n${attrs.cmd}\n${fenceEnd}' >> "$HOOK_PATH";
+            '';
           createHooks = nixpkgs.lib.concatMapStrings (attrs: singleHook attrs) hooks;
         in
         writeShellScript "nix-commit-hooks-setup" ''
